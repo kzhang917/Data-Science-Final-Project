@@ -1,0 +1,828 @@
+---
+title: "EDA Report"
+author: "Kevin Zhang"
+date: "5/12/2020"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r, message = FALSE, warning = FALSE}
+# Load Packages -----------------------------------------------------------
+
+library(tidyverse)
+library(skimr)
+library(janitor)
+library(lubridate)
+library(rworldmap)
+library(kernlab)
+library(gridExtra)
+library(ggdendro)
+library(magrittr)
+library(corrplot)
+library(usmap)
+
+# Set Seed ----------------------------------------------------------------
+
+set.seed(92541445)
+
+# Load Data ---------------------------------------------------------------
+
+# 5/9/20 Daily report:
+daily_report <- read_csv("data/csse_covid_19_data/csse_covid_19_daily_reports/05-09-2020.csv") %>%
+  clean_names()
+
+# Time series:
+confirmed_ts <- read_csv("data/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv") %>%
+  clean_names()
+
+deaths_ts <- read_csv("data/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv") %>%
+  clean_names()
+
+recovered_ts <- read_csv("data/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv") %>%
+  clean_names()
+```
+
+
+### Introduction
+
+With the ongoing COVID-19 pandemic, many are relying on predictive models to better understand the future trajectory of the disease's impact on countries across the world. Since there is a great deal of data available on the pandemic, I decided to try and use these resources to create my own predictive model, and, in the process, hopefully come to better understand how COVID-19 impacts different communities and populations.
+
+
+### About the Data
+
+The main source of data regarding COVID-19 was obtained from the Johns Hopkins University CSSE. The data from this repository which I used included daily reports and time series data for the US and all other affected countries. For global data, the daily reports contained 3232 observations of 12 variables, the confirmed cases time series data contained 266 observations of 113 variables, the deaths time series data had 266 observations of 113 variables, and the recovered time series data contained 252 observations of 113 variables. 
+
+The patterns of missingness in each of these datasets are as follows:
+
+```{r, message = FALSE, warning = FALSE}
+# Missing data:
+daily_report %>% summarise_all(funs(mean(is.na(.)) * 100)) %>%
+  pivot_longer(cols = 1:12, names_to = "var", values_to = "percent_missing") %>%
+  ggplot(aes(percent_missing, var)) +
+  geom_bar(stat = "identity", aes(fill = var)) +
+  labs(title = "Missing data: Daily Report")
+
+confirmed_ts %>% summarise_all(funs(mean(is.na(.)) * 100)) %>%
+  pivot_longer(cols = 1:113, names_to = "var", values_to = "percent_missing") %>%
+  filter(percent_missing > 0) %>% # There are a lot of variables, so I'm only choosing the ones with any missing data
+  ggplot(aes(percent_missing, var)) +
+  geom_bar(stat = "identity", aes(fill = var)) +
+  labs(title = "Missing data: Confirmed Cases Time Series")
+
+deaths_ts %>% summarise_all(funs(mean(is.na(.)) * 100)) %>%
+  pivot_longer(cols = 1:113, names_to = "var", values_to = "percent_missing") %>%
+  filter(percent_missing > 0) %>% # There are a lot of variables, so I'm only choosing the ones with any missing data
+  ggplot(aes(percent_missing, var)) +
+  geom_bar(stat = "identity", aes(fill = var)) +
+  labs(title = "Missing data: Deaths Time Series")
+
+recovered_ts %>% summarise_all(funs(mean(is.na(.)) * 100)) %>%
+  pivot_longer(cols = 1:113, names_to = "var", values_to = "percent_missing") %>%
+  filter(percent_missing > 0) %>% # There are a lot of variables, so I'm only choosing the ones with any missing data
+  ggplot(aes(percent_missing, var)) +
+  geom_bar(stat = "identity", aes(fill = var)) +
+  labs(title = "Missing data: Recovered Time Series")
+```
+
+In general, there was not much actual missing data in the datasets; for example, `admin2` was used for US county names, so other countries had a missing value for it. The same is true for other missing values, except for `lat` and `long`, which indicated latitude and longitude--however, I do not plan on using these two variables.
+
+</br>
+
+#### Other Data
+
+Many other data sources were used in this data analysis. Four datasets were retrieved from the American Community Survey (ACS) on the US Census Bureau's COVID-19 website. These datasets contained various statistics about population, income, health insurance, and internet usage, all on a state level. The purpose of this data for my analyses is to try and find any statistics that may be correlated with COVID-19 statistics.
+
+Additionally, I used a dataset giving statistics on each state's population numbers. This was used to supplement the ACS data.
+
+Finally, I used data from Google on mobility trends across the United States during the COVID-19 pandemic. I used this data to analyze how reduced mobility affects the trajectory of the pandemic.
+
+</br>
+
+### Analysis of Primary Dataset
+
+My data analysis of the primary JHU CSSE dataset involved looking at distributions of response variables such as confirmed cases. I used linear and logarithmic scales to visualize the data, but given the shape of the data, logarithmic scales show the data much better, which can be seen in these visualizations, showing the distribution of the latest numbers of cases, deaths, and recoveries by country:
+
+```{r, message = FALSE, warning = FALSE}
+daily_report %>% # All Response
+  group_by(country_region) %>%
+  summarise(total_confirmed = sum(confirmed),
+            total_deaths = sum(deaths),
+            total_recovered = sum(recovered)) %>%
+  pivot_longer(cols = c(2:4), names_to = "var") %>%
+  ggplot(aes(value)) +
+  geom_histogram() +
+  facet_wrap(~var) +
+  labs(title = "Distribution of Confirmed Cases, Deaths, and Recoveries by Country - Linear")
+
+daily_report %>% # All response variables on a log-10 scale
+  group_by(country_region) %>%
+  summarise(log_confirmed = log10(sum(confirmed)),
+            log_deaths = log10(sum(deaths)),
+            log_recovered = log10(sum(recovered))) %>%
+  pivot_longer(cols = 2:4, names_to = "var") %>%
+  ggplot(aes((value))) +
+  geom_freqpoly(aes(color = var)) +
+  labs(title = "Distribution of Confirmed Cases, Deaths, and Recoveries by country - Logarithmic")
+```
+
+Next, I plotted time series data on a global scale:
+
+```{r, message = FALSE, warning = FALSE}
+# Putting all time series info into one graphic:
+confirmed_all_countries <- confirmed_ts %>% # Total cases over time
+  select(-province_state, -lat, -long) %>%
+  pivot_longer(cols = c(2:110), names_to = "date", values_to = "cases") %>%
+  mutate(date = as_date(date, format = "x%m_%d_%y")) %>% # Convert date to a date variable
+  group_by(date) %>%
+  summarise(total_cases = sum(cases))
+
+deaths_all_countries <- deaths_ts %>% # Total deaths over time
+  select(-province_state, -lat, -long) %>%
+  pivot_longer(cols = c(2:110), names_to = "date", values_to = "deaths") %>%
+  mutate(date = as_date(date, format = "x%m_%d_%y")) %>% # Convert date to a date variable
+  group_by(date) %>%
+  summarise(total_deaths = sum(deaths))
+
+recovered_all_countries <- recovered_ts %>% # Total recovered over time
+  select(-province_state, -lat, -long) %>%
+  pivot_longer(cols = c(2:110), names_to = "date", values_to = "recovered") %>%
+  mutate(date = as_date(date, format = "x%m_%d_%y")) %>% # Convert date to a date variable
+  group_by(date) %>%
+  summarise(total_recovered = sum(recovered))
+
+worldwide_ts <- confirmed_all_countries %>%
+  left_join(deaths_all_countries, by = "date") %>%
+  left_join(recovered_all_countries, by = "date")
+
+worldwide_ts %>% pivot_longer(cols = 2:4, names_to = "type") %>% # Linear scale
+  ggplot(aes(date, value)) +
+  geom_line(aes(color = type)) +
+  labs(title = "Worldwide cases, deaths, and recoveries over time - Linear")
+
+worldwide_ts %>% pivot_longer(cols = 2:4, names_to = "type") %>% # Log scale
+  ggplot(aes(date, log10(value))) +
+  geom_line(aes(color = type)) +
+  labs(title = "Worldwide cases, deaths and recoveries over time - Logarithmic")
+```
+
+Next, I wanted to look at some of the countries most impacted by COVID-19. The confirmed cases over time are displayed for the 10 countries with the most current cases on a linear and logarithmic scale as follows:
+
+```{r}
+# Time - series for top 10 countries by confirmed cases
+top10 <- daily_report %>% group_by(country_region) %>% # 10 countries with most cases
+  summarise(total_cases = sum(confirmed)) %>%
+  arrange(desc(total_cases)) %>%
+  mutate(rank = min_rank(-total_cases)) %>%
+  filter(rank <= 10) %>%
+  pull(country_region)
+
+confirmed_ts %>% # Total cases over time - top 10 countries - linear scale
+  select(-province_state, -lat, -long) %>%
+  pivot_longer(cols = c(2:110), names_to = "date", values_to = "cases") %>%
+  mutate(date = as_date(date, format = "x%m_%d_%y")) %>% # Convert date to a date variable
+  filter(country_region %in% top10) %>%
+  group_by(country_region, date) %>%
+  summarise(total_cases = sum(cases)) %>%
+  ggplot(aes(date, total_cases)) +
+  geom_line(aes(color = country_region)) +
+  labs(title = "10 Countries with most cases - linear time series")
+  
+
+confirmed_ts %>% # Total cases over time - top 10 countries - log scale
+  select(-province_state, -lat, -long) %>%
+  pivot_longer(cols = c(2:110), names_to = "date", values_to = "cases") %>%
+  mutate(date = as_date(date, format = "x%m_%d_%y")) %>% # Convert date to a date variable
+  filter(country_region %in% top10) %>%
+  group_by(country_region, date) %>%
+  summarise(total_cases = sum(cases)) %>%
+  ggplot(aes(date, log10(total_cases))) +
+  geom_line(aes(color = country_region)) +
+  labs(title = "10 countries with most cases - logarithmic time series")
+```
+
+The data here shows that the US is adding more cases at a relatively linear rate, while most other countries are slowing down, with the exception of Russia and Brazil, which are seeing increasing numbers of new cases per day.
+
+</br>
+
+#### Analysis of US Data
+
+From this point on in the data analysis, I decided to focus on US data. This decision was made in part because US data is more consistently available, and data such as that from the ACS is very consistent and does not have much missing data. I first plotted the time series cases and deaths for the US as a whole:
+
+```{r, message = FALSE, warning = FALSE}
+# US Focused analysis
+covid_us_report <- read_csv("data/unprocessed/csse_covid_19_data/csse_covid_19_daily_reports_us/05-09-2020.csv") %>%
+  clean_names()
+
+us_confirmed_ts <- read_csv("data/unprocessed/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv") %>%
+  clean_names()
+
+us_deaths_ts <- read_csv("data/unprocessed/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv") %>%
+  clean_names()
+
+# Cases, fatalities
+us_confirmed_ts <- us_confirmed_ts %>% pivot_longer(cols = 12:120, names_to = "date", values_to = "confirmed") %>%
+  mutate(date = as_date(date, format = "x%m_%d_%y")) # Convert to a more usable format
+
+us_deaths_ts <- us_deaths_ts %>% pivot_longer(cols = 13:121, names_to = "date", values_to = "deaths") %>%
+  mutate(date = as_date(date, format = "x%m_%d_%y"))
+
+us_ts <- us_confirmed_ts %>%
+  group_by(date) %>%
+  summarise(total_cases = sum(confirmed)) %>% left_join(
+    us_deaths_ts %>%
+      
+      group_by(date) %>%
+      
+      summarise(total_deaths = sum(deaths)),
+    
+    by = "date")
+
+# Plot cumulative cases and deaths:
+us_ts %>% # Linear
+  pivot_longer(cols = 2:3, names_to = "report", values_to = "num") %>%
+  ggplot(aes(date, num)) +
+  geom_line(aes(color = report)) +
+  labs(title = "US Cases and Deaths - Linear")
+
+us_ts %>% # Log
+  pivot_longer(cols = 2:3, names_to = "report", values_to = "num") %>%
+  ggplot(aes(date, log10(num))) +
+  geom_line(aes(color = report)) +
+  labs(title = "US Cases and Deaths - Logarithmic")
+```
+
+I also included a time series plot which displayed each state as a separate line, but I omitted it as it was very difficult to read.
+ 
+</br>
+
+### Creating New Variables
+
+Given the nature of the data, investigating the relationship between response and predictor variables can be quite difficult. The total number of cases in a given state, for example, relies heavily on the testing capacity of that state. The mortality rate depends on how many of the actual number of people who have contracted COVID-19 are actually being tested and reported as a confirmed case. Variables such as hospitalization and incident rate are provided exclusively for US data, but there are more missing values in these variables. 
+
+I chose to create a new variable to measure as a response variable: the daily change in the total number of deaths for each given state. This, I believed, would provide a cleaner measure of the degree to which COVID-19 is impacting each state.
+
+From this daily rate of change variable, I created two more summary variables--the average rate of increase in deaths for each state following the 30 days after each state's first reported death, and the average rate of increase in deaths for all states in the past 10 days. The purpose for creating these summary statistics was to then compare them with various ACS variables and then see whether or not there were any significant correlations.
+
+</br>
+
+#### Analysis of the relationship between response variables and ACS predictors
+
+After calculating the new summary statistics described above, I loaded four different ACS datasets on a state level - population, income, internet access, and health insurance. The analysis I did with this data could have been more thorough (i.e. county level analysis and more variables investigated), but for the purposes of this EDA I started off looking at state level data.
+
+For each dataset, I joined together previously existing response variables and new predictor variables by state names. Then, I calculated a correlation matrix and sorted each response variable to view the most correlated predictors. I took five predictors from each of the four datasets which had a correlation of over 0.5, and added them to another dataset. 
+
+I also repeated this process for a dataset containing total state level population counts and densities.
+
+After taking these steps, I decided analyze the data via clustering. The initial results were very poor, due to all the predictors being highly correlated with population numbers, as they were in the form of totals (of an entire state population) rather than percentages. I converted them into percentages and the proceeded with the clustering. 
+
+First, here is a correlation matrix:
+
+```{r, message = FALSE, warning = FALSE}
+# Creating a percent change variable: -------------------------------------
+
+# Calculates percentage change in deaths for a given date
+percent_change_deaths <- function(data){
+  data %>%
+    group_by(date) %>%
+    summarise(deaths = sum(deaths)) %>%
+    mutate(pct_change = (deaths - lag(deaths)) / lag(deaths) * 100)
+}
+
+# Run percent change function for all states
+percent_change_death <- us_deaths_ts %>% group_nest(province_state) %>% 
+  mutate(change = map(data, percent_change_deaths)) %>%
+  select(province_state, change) %>%
+  unnest(cols = c(change)) 
+
+# Change all non-number values to NA
+percent_change_death <- percent_change_death %>% 
+  mutate(pct_change = ifelse(is.nan(pct_change), NA, pct_change)) %>%
+  mutate(pct_change = ifelse(pct_change == Inf, NA, pct_change)) 
+
+# Create variable for earliest death, 30 days after 
+deaths_dates <- percent_change_death %>%
+  filter(deaths > 0) %>%
+  group_by(province_state) %>%
+  summarise(first_death = min(date),
+            day_30 = first_death + days(30))
+
+# Use earliest death and 30 day period to calculate 30 day avg rate of change:
+first_30 <- percent_change_death %>%
+  left_join(deaths_dates, by = "province_state") %>%
+  filter(date > first_death, date <= day_30) %>%
+  group_by(province_state) %>%
+  summarise(first30 = mean(pct_change, na.rm = TRUE)) %>%
+  arrange(desc(first30))
+
+# Average growth in deaths in past 10 days:
+past_10 <- percent_change_death %>%
+  filter(date >= as_date("05-01-20", format = "%m-%d-%y")) %>%
+  group_by(province_state) %>%
+  summarise(past10 = mean(pct_change, na.rm = TRUE)) %>%
+  mutate(past10 = ifelse(is.nan(past10), 0, past10)) %>%
+  arrange(desc(past10))
+
+# Overall mean growth
+overall_change <- percent_change_death %>%
+  group_by(province_state) %>%
+  summarise(mean_change = mean(pct_change, na.rm = TRUE)) %>%
+  mutate(mean_change = ifelse(is.nan(mean_change), 0, mean_change)) %>%
+  arrange(desc(mean_change))
+
+# Add summary percent change statistics to the main dataset:
+covid_us_report <- covid_us_report %>% 
+  left_join(first_30, by = "province_state") %>%
+  left_join(past_10, by = "province_state")
+
+# Analysis of Predictor Variables -----------------------------------------
+
+# Get US Data From ACS:
+
+
+# Population Data ---------------------------------------------------------
+
+
+acs_population <- read_csv("data/unprocessed/ACS/ACS_Total_Population_-_State.csv") %>%
+  clean_names()
+
+covid_data_pop <- covid_us_report %>%
+  filter(province_state %in% acs_population$name) %>%
+  rename(name = province_state) %>%
+  left_join(acs_population, by = "name")
+
+pop_corr <- covid_data_pop %>%
+  select(confirmed, deaths, incident_rate, people_tested, people_hospitalized, mortality_rate,
+         testing_rate, hospitalization_rate, first30, past10, 25:140) %>%
+  cor() %>%
+  as_tibble()
+
+# Store most correlated variables:
+covid_all_vars <- covid_data_pop %>%
+  select(1:22, b01001_049e, b01001_042e, b01001_041e, b01001_040e, b01001_018e) 
+
+
+
+
+
+# Internet Connectivity Data ----------------------------------------------
+
+acs_internet <- read_csv("data/unprocssed/ACS/ACS_Internet_connectivity_-_State.csv") %>%
+  clean_names()
+
+covid_data_internet <- covid_us_report %>%
+  filter(province_state %in% acs_internet$name) %>%
+  rename(name = province_state) %>%
+  left_join(acs_internet, by = "name")
+
+internet_corr <- covid_data_internet %>%
+  select(confirmed, deaths, incident_rate, people_tested, people_hospitalized, mortality_rate,
+         testing_rate, hospitalization_rate, first30, past10, 25:78) %>%
+  cor() %>%
+  as_tibble()
+
+covid_all_vars <- covid_all_vars %>% bind_cols(
+  covid_data_internet %>%
+    select(b28001_008e, b28001_011e, b28001_004e, b28002_008e, b28001_010e))
+
+# Income Data -------------------------------------------------------------
+
+acs_income <- read_csv("data/unprocessed/ACS/ACS_Household_Income_Distribution_-_State.csv") %>%
+  clean_names()
+
+covid_data_income <- covid_us_report %>%
+  filter(province_state %in% acs_income$name) %>%
+  rename(name = province_state) %>%
+  left_join(acs_income, by = "name")
+
+income_corr <- covid_data_income %>%
+  select(confirmed, deaths, incident_rate, people_tested, people_hospitalized, mortality_rate,
+         testing_rate, hospitalization_rate, first30, past10, 25:72) %>%
+  cor() %>%
+  as_tibble()
+
+covid_all_vars <- covid_all_vars %>% bind_cols(
+  covid_data_income %>%
+    select(b19001_015e, b19001_002e, b19001_014e, b19001_016e, b19001_calc_num_ge100e))
+
+
+# Insurance Data ----------------------------------------------------------
+
+acs_insurance <- read_csv("data/unprocessed/ACS/ACS_Health_Insurance_Coverage_-_State.csv") %>%
+  clean_names()
+
+covid_data_insurance <- covid_us_report %>%
+  filter(province_state %in% acs_income$name) %>%
+  rename(name = province_state) %>%
+  left_join(acs_insurance, by = "name")
+
+insurance_corr <- covid_data_insurance %>%
+  select(confirmed, deaths, incident_rate, people_tested, people_hospitalized, mortality_rate,
+         testing_rate, hospitalization_rate, first30, past10, 25:93) %>%
+  cor() %>%
+  as_tibble()
+
+covid_all_vars <- covid_all_vars %>% bind_cols(
+  covid_data_insurance %>%
+    select(b27010_036e, b27010_042e, b27010_010e, b27010_026e,
+           b27010_004e))
+
+
+# State Population Data ---------------------------------------------------
+
+state_pop <- read_csv("data/unprocessed/state_population.csv") %>%
+  clean_names() %>%
+  rename(name = state)
+
+covid_data_pop2 <- covid_us_report %>%
+  filter(province_state %in% state_pop$name) %>%
+  rename(name = province_state) %>%
+  left_join(state_pop, by = "name")
+
+pop2_corr <- covid_data_pop2 %>%
+  select(confirmed, deaths, incident_rate, people_tested, people_hospitalized, mortality_rate,
+         testing_rate, hospitalization_rate, first30, past10, 22:28) %>%
+  cor() %>%
+  as_tibble()
+
+covid_all_vars <- covid_all_vars %>%
+  bind_cols(covid_data_pop2 %>% select(pop))
+
+# Change all variables into a percentage of population
+covid_all_vars <- covid_all_vars %>% mutate_at(23:42, funs(./pop))
+
+# Looking at all saved variables: -----------------------------------------
+
+covid_all_vars %>%
+  select(first30, past10, 23:42) %>%
+  cor() %>%
+  corrplot()
+```
+
+There are correlations between some of these variables, but they are not overwhelmingly correlated, as was the case before predictors were converted from totals to percentages.
+
+Importantly, all of these predictors were moderately correlated with the `first30` variable, which is the mean growth rate in deaths during the first 30 days following the first death in each state. None of them were even moderately correlated with `past10`, which is the average rate of growth in the psat 10 days. 
+
+Also, it is important to note that the variables were originally chosen based on how they correlated with response variables in their total, not percentage, form. Once the conversion was done, much of the correlations with the `first30` variable were eliminated. Although I did not do it in this EDA, a good next step to take might be to analyze the predictors again after converting all of them to percentages.
+
+</br>
+
+#### Analysis using Clustering
+
+I performed hierarchical, K-Means, and spectral clustering on the states using only the predictors. Some of the results I obtained are shown below:
+
+```{r, message = FALSE, warning = FALSE}
+# Clustering --------------------------------------------------------------
+
+# Helper Functions --------------------------------------------------------
+
+# run_hclust: runs hierarchical clustering with the given method
+# args: x - data used for clustering; meth - method of clustering
+run_hclust <- function(x, meth){
+  return(hclust(dist(x), method = meth)) # hclust runs the clustering algorithm.
+}
+
+# cut_hclust: gives desired number of clusters for an hclust() object
+# args: hclust_obj - an hclust() object; ncuts - number of clusters desired
+cut_hclust <- function(hclust_obj, ncuts){
+  return(cutree(hclust_obj, ncuts))
+}
+
+# get_within_ss: Get within-cluster SS from a K-means object
+# args: kmean_obj - a K-means obj
+get_within_ss <- function(kmean_obj){
+  return(kmean_obj$tot.withinss)
+}
+
+# get_cluster: get cluster labels for data
+# args: x - data; clust_obj - a cluster object
+get_cluster <- function(x, clust_obj){
+  
+  if(class(clust_obj) == "kmeans"){
+    clust = clust_obj$cluster
+  }
+  else{
+    clust = clust_obj
+  }
+  
+  out = x %>%
+    
+    mutate(cluster = clust)
+  
+  return(out)
+}
+
+
+# Hierarchical Clustering -------------------------------------------------
+
+
+covid_cluster_data <- covid_all_vars %>%
+  select(name, 23:42)
+
+scaled_cluster_data <- covid_cluster_data %>%
+  select(2:21) %>%
+  as.matrix() %>%
+  scale() %>%
+  as_tibble()
+
+covid_cluster_data_scaled <- 
+  covid_cluster_data %>%
+  select(name) %>%
+  bind_cols(scaled_cluster_data)
+
+covid_hclust <- tibble(
+  dat = covid_cluster_data_scaled %>% list()
+)
+
+covid_hclust <- covid_hclust %>%
+  mutate(
+    hcl = map2(dat, "complete", run_hclust), # Create clusters
+    dendo = map(hcl, ggdendrogram), # Create dendrogram,
+  )
+
+
+covid_hclust <- covid_hclust %>%
+  crossing(ncuts = c(2:6)) %>%
+  mutate(
+    clusters = map2(hcl, ncuts, cut_hclust),
+    clust_dat = map2(dat, clusters, get_cluster)
+  )
+
+covid_hclust_6cut <- covid_hclust %>%
+  filter(ncuts == 6) %>%
+  select(clust_dat) %>%
+  unnest(cols = c(clust_dat)) %>%
+  rename(state = name) %>%
+  mutate(cluster = as_factor(cluster))
+
+# Plot 6 cluster cut on map:
+plot_usmap(data = covid_hclust_6cut, values = "cluster", color = "white") +
+  scale_fill_discrete(name = "Cluster", na.translate = FALSE) +
+  labs(title = "Hierarchical Clustering, 6 clusters")
+
+# K-Means Clustering ------------------------------------------------------
+
+covid_kmeans <- tibble(xmat = list(covid_cluster_data_scaled %>% select(-name))) %>%
+  crossing(nclust = 2:6)
+
+covid_kmeans <- covid_kmeans %>% 
+  mutate(
+    kmean = map2(xmat, nclust, kmeans, nstart = 20),
+    within_ss = map_dbl(kmean, get_within_ss),
+    clusters = map2(xmat, kmean, get_cluster)
+  )
+
+covid_kmeans_5clust <- covid_kmeans %>%
+  filter(nclust == 5) %>%
+  select(clusters) %>%
+  unnest(cols = c(clusters))
+
+covid_kmeans_5clust <- covid_kmeans_5clust %>%
+  bind_cols(covid_cluster_data_scaled %>% select(name)) %>%
+  select(name, everything()) %>%
+  rename(state = name) %>%
+  mutate(cluster = as_factor(cluster))
+
+# 5 Clusters
+plot_usmap(data = covid_kmeans_5clust, values = "cluster", color = "white") +
+  scale_fill_discrete(name = "Cluster", na.translate = FALSE) +
+  labs(title = "K-Means Clustering, 5 clusters")
+
+# Spectral Clustering -----------------------------------------------------
+
+covid_spectral <- tibble(data = list(covid_cluster_data_scaled %>% select(-name)))
+
+# Create spectral clusters--nclus = 5
+covid_spectral <- covid_spectral %>% mutate(
+  spec = map(.x = data,
+             .f = function(x) specc(as.matrix(x), centers = 5)),
+  spec_data = map2(data, spec, get_cluster)
+)
+
+covid_spectral_data <- covid_spectral %>%
+  select(spec_data) %>%
+  unnest(cols = c(spec_data)) %>%
+  bind_cols(covid_cluster_data_scaled %>% select(name)) %>%
+  select(name, everything()) %>%
+  rename(state = name) %>%
+  mutate(cluster = as_factor(as.character(cluster)))
+
+plot_usmap(data = covid_spectral_data, values = "cluster", color = "white") +
+  scale_fill_discrete(name = "Cluster", na.translate = FALSE) +
+  labs(title = "Spectral Clustering, 5 clusters")
+
+```
+
+Note that Puerto Rico, which was not on the map, was contained in its own cluster for hierarchical and K-Means clustering. Otherwise, the results seem to be much better for K-Means and spectral than for hierarchical, which did a poor job of distinguishing between most states.
+
+</br>
+
+#### Comparing Cluster Results to Response Variables
+
+In the next step, I compared various response variables separated by cluster for the K-Means and spectral methods:
+
+```{r, message = FALSE, warning = FALSE}
+# K-Means
+covid_kmeans_5clust %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(log10(confirmed), log10(deaths))) +
+  geom_point(aes(color = cluster)) +
+  labs(title = "confirmed cases vs deaths by cluster, K-Means")
+
+covid_kmeans_5clust %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(first30, past10)) +
+  geom_point(aes(color = cluster)) +
+  labs(title = "first 30 vs past 10 average rates by cluster, K-Means")
+
+covid_kmeans_5clust %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(incident_rate, mortality_rate)) +
+  geom_point(aes(color = cluster)) +
+  labs(title = "incident_rate vs mortality rates by cluster, K-Means")
+
+covid_kmeans_5clust %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(incident_rate, cluster)) +
+  geom_boxplot() +
+  labs(title = "incident rate by cluster, K-Means")
+
+covid_kmeans_5clust %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(past10, cluster)) +
+  geom_boxplot() +
+  labs(title = "past10 by cluster, K-Means")
+
+covid_kmeans_5clust %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(first30, cluster)) +
+  geom_boxplot() +
+  labs(title = "first30 by cluster, K-Means")
+
+# Spectral
+covid_spectral_data %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(log10(confirmed), log10(deaths))) +
+  geom_point(aes(color = cluster)) +
+  labs(title = "confirmed cases vs deaths by cluster, spectral")
+
+covid_spectral_data %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(first30, past10)) +
+  geom_point(aes(color = cluster)) +
+  labs(title = "first30 vs past10 by cluster, spectral")
+
+covid_spectral_data %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(incident_rate, cluster)) +
+  geom_boxplot() +
+  labs(title = "incident rate by cluster, spectral")
+
+covid_spectral_data %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(past10, cluster)) +
+  geom_boxplot() +
+  labs(title = "past10 by cluster, spectral")
+
+covid_spectral_data %>% select(state, cluster) %>%
+  rename(province_state = state) %>%
+  left_join(covid_us_report, by = "province_state") %>%
+  ggplot(aes(first30, cluster)) +
+  geom_boxplot() +
+  labs(title = "first30 by cluster, spectral")
+```
+
+It appears that the clustering does not necessarily have a clear, significant effect on the response outcomes for either type of clustering. No immediate conclusions can be drawn from the results. It is likely, though, that the predictors chosen for the cluster have at most a slight effect on the response variables, based on the effects of converting the predictors from totals to percentages. 
+
+Furthermore, there is no complete, thoroughly investigated conclusion as to why some states, such as New York and New Jersey, had much worse outbreaks than others. Unless we can identify these factors and adjust the data to account for their impact, it will be difficult to truly measure the effect of the ACS predictors on the data without deeper analysis.
+
+#### Analysis of the Relationship between Google's Mobility Data and COVID-19 Deaths
+
+In the next step of my EDA, I investigated whether or not Google's Community Mobility Reports might be related to day-to-day percent changes in death totals. To do this, I converted the dataset and joined it with the time-series percent change in death rates which I computed earlier. I also looked at the overall trend for the US as a whole:
+
+```{r, message = FALSE, warning = FALSE}
+# Looking at Lockdown Data ------------------------------------------------
+
+mobility <- read_csv("data/unprocessed/global_mobility_report.csv", col_types = list(
+  col_character(),
+  col_character(),
+  col_character(),
+  col_character(),
+  col_date(format = ""),
+  col_double(),
+  col_double(),
+  col_double(),
+  col_double(),
+  col_double(),
+  col_double()
+)) %>%
+  clean_names()
+
+mobility_by_state <- mobility %>%
+  filter(country_region == "United States", is.na(sub_region_2)) %>%
+  group_by(sub_region_1, date) %>%
+  summarise(retail_rec = mean(retail_and_recreation_percent_change_from_baseline, na.rm = TRUE),
+            grocery_pharmacy = mean(grocery_and_pharmacy_percent_change_from_baseline, na.rm = TRUE),
+            parks = mean(parks_percent_change_from_baseline, na.rm = TRUE),
+            transit = mean(transit_stations_percent_change_from_baseline, na.rm = TRUE),
+            workplace = mean(workplaces_percent_change_from_baseline, na.rm = TRUE), 
+            residential = mean(residential_percent_change_from_baseline, na.rm = TRUE)) %>%
+  rename(province_state = sub_region_1)
+
+mobility_us <- mobility %>%
+  filter(country_region == "United States", is.na(sub_region_1))
+
+# Overall trend for US:
+mobility_us %>%
+  pivot_longer(cols = 6:11, names_to = "cat") %>%
+  ggplot(aes(date, value)) +
+  geom_line(aes(color = cat))
+```
+
+There are some interesting patterns in the data. The lines show the percentage difference from baseline (i.e. under normal conditions) in how often data is coming from various locations, such as at home (residential) or workplaces. Clearly, location data is showing more people at home and much less at workplaces or on transit. However, these overall trends are accompanied by fluctuations, which can be most clearly seen in the residential and workplace lines. I have not investigated these fluctuations in this EDA, but I plan to do so as a next step.
+
+After joining together the state data, I looked at some visualizations for a few states: each plot shows the transit and residential data from Google as two separate lines, and a third line shows the daily percent change in deaths:
+
+```{r, message = FALSE, warning = FALSE}
+
+# Analysis by state:
+mobility_analysis_states <- percent_change_death %>%
+  left_join(mobility_by_state, by = c("province_state", "date"))
+
+# Look at some states:
+mobility_analysis_states %>% # Washington
+  filter(province_state == "Washington") %>%
+  pivot_longer(cols = c(pct_change, transit, residential), names_to = "var") %>%
+  ggplot(aes(date, value)) +
+  geom_line(aes(color = var)) +
+  xlim(as_date("13-02-20", format = "%d-%m-%y"), as_date("07-05-20", format = "%d-%m-%y")) +
+  ylim(-80, 50) + 
+  labs(title = "Washington State")
+
+mobility_analysis_states %>% # New York
+  filter(province_state == "New York") %>%
+  pivot_longer(cols = c(pct_change, transit, residential), names_to = "var") %>%
+  ggplot(aes(date, value)) +
+  geom_line(aes(color = var)) +
+  xlim(as_date("13-02-20", format = "%d-%m-%y"), as_date("07-05-20", format = "%d-%m-%y")) +
+  ylim(-80, 50) +
+  labs(title = "New York State")
+
+mobility_analysis_states %>% # Mississippi
+  filter(province_state == "Mississippi") %>%
+  pivot_longer(cols = c(pct_change, transit, residential), names_to = "var") %>%
+  ggplot(aes(date, value)) +
+  geom_line(aes(color = var)) +
+  xlim(as_date("13-02-20", format = "%d-%m-%y"), as_date("07-05-20", format = "%d-%m-%y")) +
+  ylim(-80, 50) + 
+  labs(title = "Mississippi")
+
+mobility_analysis_states %>% # Illinois
+  filter(province_state == "Illinois") %>%
+  pivot_longer(cols = c(pct_change, transit, residential), names_to = "var") %>%
+  ggplot(aes(date, value)) +
+  geom_line(aes(color = var)) +
+  xlim(as_date("13-02-20", format = "%d-%m-%y"), as_date("07-05-20", format = "%d-%m-%y")) +
+  ylim(-80, 50) +
+  labs(title = "Illinois")
+
+
+
+```
+
+There's a clear trend in the plots: all four states showed signs of people going to work less and staying home more. This is accompanied by a decrease in the percent change in death rates. Mississippi, which has shown somewhat of an increase in mobility recently, also sees a spike in death rates towards the most recent dates displayed. This data certainly supports the hypothesis that lockdowns can slow down the amount of deaths caused by COVID-19, and as some states ease lockdown policies, more data will be available in the coming weeks which provides more insight as to whether or not the easing of lockdowns can cause deaths to spike again.
+
+</br> 
+
+### Conclusion
+
+Although I end the EDA here, there is still much to be investigated. Most of this EDA was dedicated to finding variables which show promise in possibly explaining the trends in how COVID-19 affects the US and its communities. I have found that, on a state level, there is no strong evidence to suggest that any of the variables from the four ACS datasets which I used have a significant relationship with COVID-19 statistics. However, to be sure, more analyses should be done on a county level. Also, I have found that mobility data could potentially serve as a good predictor of COVID-19 related trends. 
+
+The next steps involve continuing to search for potential variables that can influence the impact of COVID-19. For example, there have been reports that COVID-19 is affecting Black and Latino communities disproportionally, perhaps due to socioeconomic factors and the presence of more comorbidities. More time should be dedicated to exploring how mobility data can be used to model the future trajectory of COVID-19 deaths, as well as how both of these might be impacted by government.
+
+</br>
+
+### Data Sources:
+
+COVID-19 Dashboard by the Center for Systems Science and Engineering (CSSE) at Johns Hopkins University. (2020, April 24). Retrieved from https://github.com/CSSEGISandData/COVID-19
+
+Census COVID-19 Data Hub. Retrieved from https://covid19.census.gov/
+
+Google LLC "Google COVID-19 Community Mobility Reports" Retrieved from https://www.google.com/covid19/mobility/
+
+US States - Ranked by Population 2020. Retrieved from https://worldpopulationreview.com/states/
+
+
+
+
+
